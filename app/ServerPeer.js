@@ -12,8 +12,29 @@ const tracks = stream.getTracks();
 
 export default class ServerPeer extends RTCPeerConnection {
 	static #Init = {
+		iceCandidatePoolSize: 10,
+		bundlePolicy: "max-bundle",
 		iceServers: [
-			{ urls: "stun:stun.l.google.com:19302" }
+			{
+				urls: [
+					"stun:stun.l.google.com:19302",
+					"stun:stun1.l.google.com:19302",
+					"stun:stun2.l.google.com:19302",
+					"stun:stun3.l.google.com:19302",
+					"stun:stun4.l.google.com:19302",
+					"stun:stun.cloudflare.com:3478"
+				]
+			},
+			{
+				urls: [
+					"turn:openrelay.metered.ca:80",
+					"turn:openrelay.metered.ca:443",
+					"turn:openrelay.metered.ca:443?transport=tcp",
+					"turns:openrelay.metered.ca:443"
+				],
+				username: "openrelayproject",
+				credential: "openrelayproject"
+			}
 		]
 	};
 
@@ -146,7 +167,7 @@ export default class ServerPeer extends RTCPeerConnection {
 
 			case "failed": {
 				if (signalingWs.readyState === signalingWs.OPEN) {
-					// this.restartIce();
+					this.restartIce();
 				} else {
 					this.close();
 				}

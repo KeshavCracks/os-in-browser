@@ -6,12 +6,45 @@ const screenshare = document.getElementById("screenshare");
 let pointerMovementChannel, pointerClickChannel, keyboardTypeChannel, pointerScrollChannel, clipboardSyncChannel;
 let lastClipboardValue;
 
+const ICE_CONFIG = {
+	iceCandidatePoolSize: 10,
+	bundlePolicy: "max-bundle",
+	iceServers: [
+		{
+			urls: [
+				"stun:stun.l.google.com:19302",
+				"stun:stun1.l.google.com:19302",
+				"stun:stun2.l.google.com:19302",
+				"stun:stun3.l.google.com:19302",
+				"stun:stun4.l.google.com:19302",
+				"stun:stun.cloudflare.com:3478"
+			]
+		},
+		// TCP/TLS TURN helps when UDP STUN is blocked (Cloudflare WARP, some VPNs/firewalls)
+		{
+			urls: [
+				"turn:openrelay.metered.ca:80",
+				"turn:openrelay.metered.ca:443",
+				"turn:openrelay.metered.ca:443?transport=tcp",
+				"turns:openrelay.metered.ca:443"
+			],
+			username: "openrelayproject",
+			credential: "openrelayproject"
+		}
+	]
+};
+
+const CONNECTION_FAIL_HINT =
+	"Connection to the remote desktop failed.\n\n" +
+	"This is usually a network issue, not a broken session.\n" +
+	"Try:\n" +
+	"1. Disconnect Cloudflare WARP / any VPN, then reload\n" +
+	"2. Disable browser shields that block WebRTC\n" +
+	"3. Try another network (phone hotspot often works)\n" +
+	"4. Make sure you clicked Allow on the host screenshare prompt";
+
 export default class ClientPeer extends RTCPeerConnection {
-	static #Init = {
-		iceServers: [
-			{ urls: "stun:stun.l.google.com:19302" }
-		]
-	};
+	static #Init = ICE_CONFIG;
 
 	signalingWs = null;
 	#remoteDescriptionReady = Promise.withResolvers();
@@ -97,17 +130,17 @@ export default class ClientPeer extends RTCPeerConnection {
 		const { connectionState, signalingWs } = this;
 		switch (connectionState) {
 			case "failed": {
-				window.alert("Connection to the remote desktop failed, retrying connection...");
+				window.alert(CONNECTION_FAIL_HINT);
 				if (signalingWs.readyState === signalingWs.OPEN) {
 					this.restartIce();
 				} else {
 					this.close();
 				}
 				break;
-			};
+			}
 
 			case "disconnected": {
-				window.alert("Disconnected from the remote desktop, retrying connection...");
+				console.warn("WebRTC disconnected; waiting for ICE to recover...");
 				break;
 			}
 
@@ -116,10 +149,15 @@ export default class ClientPeer extends RTCPeerConnection {
 				signalingWs.close();
 				ClientPeer.#SetRemoteControlMode(false);
 				break;
-			};
+			}
+
+			case "connected":
+			case "connecting":
+			case "new":
+				break;
 
 			default: {
-				console.error(`Unknown connection state: ${connectionState}`);
+				console.warn(`Unknown connection state: ${connectionState}`);
 				break;
 			}
 		}
@@ -267,10 +305,11 @@ async function requestUntilSupported(element, methodName, optionsList) {
 		try {
 			return await method(options || {});
 		} catch (error) {
-			if (error.name === "NotSupportedError") {
+			if (error.name === "NotSupportedError" || error.name === "SecurityError" || error.name === "InvalidStateError") {
 				continue;
 			} else {
-				throw error;
+				console.warn(`${methodName} failed:`, error);
+				return;
 			}
 		}
 	}
