@@ -3,15 +3,43 @@ import codeMap from "./code-map.json" with { type: "json" };
 const sharedBytes = new Uint8Array(13);
 const sharedView = new DataView(sharedBytes.buffer);
 const screenshare = document.getElementById("screenshare");
+const tunnelFrame = document.getElementById("tunnel-frame");
 let pointerMovementChannel, pointerClickChannel, keyboardTypeChannel, pointerScrollChannel, clipboardSyncChannel;
 let lastClipboardValue;
+let tunnelWs = null;
+let webrtcLive = false;
+let lastTunnelUrl = null;
+
+const ICE_CONFIG = {
+	iceCandidatePoolSize: 10,
+	bundlePolicy: "max-bundle",
+	iceServers: [
+		{
+			urls: [
+				"stun:stun.l.google.com:19302",
+				"stun:stun1.l.google.com:19302",
+				"stun:stun2.l.google.com:19302",
+				"stun:stun3.l.google.com:19302",
+				"stun:stun4.l.google.com:19302",
+				"stun:stun.cloudflare.com:3478"
+			]
+		},
+		// TCP/TLS TURN helps when UDP STUN is blocked (Cloudflare WARP, some VPNs/firewalls)
+		{
+			urls: [
+				"turn:openrelay.metered.ca:80",
+				"turn:openrelay.metered.ca:443",
+				"turn:openrelay.metered.ca:443?transport=tcp",
+				"turns:openrelay.metered.ca:443"
+			],
+			username: "openrelayproject",
+			credential: "openrelayproject"
+		}
+	]
+};
 
 export default class ClientPeer extends RTCPeerConnection {
-	static #Init = {
-		iceServers: [
-			{ urls: "stun:stun.l.google.com:19302" }
-		]
-	};
+	static #Init = ICE_CONFIG;
 
 	signalingWs = null;
 	#remoteDescriptionReady = Promise.withResolvers();
@@ -19,9 +47,10 @@ export default class ClientPeer extends RTCPeerConnection {
 	constructor (signalingUrl) {
 		// Pointer lock makes events added to "screenshare" element not work since document.documentElement is the one requesting for pointer lock - a child of "window".
 		super(ClientPeer.#Init);
-		window.alert("Make sure to click to view the screenshare!");
 
 		this.signalingWs = new WebSocket(signalingUrl);
+		this.signalingWs.binaryType = "arraybuffer";
+		tunnelWs = this.signalingWs;
 		const pingInterval = setInterval(() => this.#sendWSMessage("ping"), 1337);
 		this.signalingWs.addEventListener("close", () => clearInterval(pingInterval));
 		this.signalingWs.addEventListener("message", this.#onTrickleICEMessage.bind(this));
@@ -97,29 +126,34 @@ export default class ClientPeer extends RTCPeerConnection {
 		const { connectionState, signalingWs } = this;
 		switch (connectionState) {
 			case "failed": {
-				window.alert("Connection to the remote desktop failed, retrying connection...");
+				webrtcLive = false;
 				if (signalingWs.readyState === signalingWs.OPEN) {
 					this.restartIce();
-				} else {
-					this.close();
 				}
 				break;
-			};
+			}
 
 			case "disconnected": {
-				window.alert("Disconnected from the remote desktop, retrying connection...");
+				webrtcLive = false;
 				break;
 			}
 
 			case "closed": {
-				window.alert("Remote desktop connection was closed.");
-				signalingWs.close();
-				ClientPeer.#SetRemoteControlMode(false);
+				webrtcLive = false;
 				break;
-			};
+			}
+
+			case "connected":
+				webrtcLive = true;
+				if (tunnelFrame) tunnelFrame.style.display = "none";
+				break;
+
+			case "connecting":
+			case "new":
+				break;
 
 			default: {
-				console.error(`Unknown connection state: ${connectionState}`);
+				console.warn(`Unknown connection state: ${connectionState}`);
 				break;
 			}
 		}
@@ -130,6 +164,11 @@ export default class ClientPeer extends RTCPeerConnection {
 	}
 
 	async #onTrickleICEMessage(event) {
+		if (event.data instanceof ArrayBuffer) {
+			ClientPeer.#OnTunnelFrame(event.data);
+			return;
+		}
+
 		let data;
 		try { data = JSON.parse(event.data); } catch { return; }
 
@@ -164,7 +203,16 @@ export default class ClientPeer extends RTCPeerConnection {
 
 	static #OnTrack(event) {
 		screenshare.srcObject = event.streams[0];
-		// screenshare.play().catch(console.error);
+		screenshare.play().catch(() => {});
+		if (tunnelFrame) tunnelFrame.style.display = "none";
+	}
+
+	static #OnTunnelFrame(buffer) {
+		if (webrtcLive || !tunnelFrame) return;
+		if (lastTunnelUrl) URL.revokeObjectURL(lastTunnelUrl);
+		lastTunnelUrl = URL.createObjectURL(new Blob([buffer], { type: "image/jpeg" }));
+		tunnelFrame.src = lastTunnelUrl;
+		tunnelFrame.style.display = "block";
 	}
 
 	static #SetRemoteControlMode(isInRemoteControlMode) {
@@ -188,20 +236,32 @@ if ("onclipboardchange" in navigator.clipboard) {
 	setInterval(syncClipboard, 134);
 } */
 
-function onPointerMove(event) {
-	if (pointerMovementChannel?.readyState !== "open") return;
-	event.preventDefault();
-
-	sharedView.setUint8(0, document.pointerLockElement ? 1 : 0);
-	if (document.pointerLockElement) {
-		sharedView.setInt32(1, event.movementX, true);
-		sharedView.setInt32(5, event.movementY, true);
-	} else {
-		sharedView.setUint32(1, event.clientX, true);
-		sharedView.setUint32(5, event.clientY, true);
+function sendTunnel(type, message) {
+	if (tunnelWs?.readyState === WebSocket.OPEN) {
+		tunnelWs.send(JSON.stringify({ type, message }));
 	}
-	
-	pointerMovementChannel.send(sharedBytes.subarray(0, 9));
+}
+
+function onPointerMove(event) {
+	event.preventDefault();
+	const relative = !!document.pointerLockElement;
+	const x = relative ? event.movementX : event.clientX;
+	const y = relative ? event.movementY : event.clientY;
+
+	if (pointerMovementChannel?.readyState === "open") {
+		sharedView.setUint8(0, relative ? 1 : 0);
+		if (relative) {
+			sharedView.setInt32(1, x, true);
+			sharedView.setInt32(5, y, true);
+		} else {
+			sharedView.setUint32(1, x, true);
+			sharedView.setUint32(5, y, true);
+		}
+		pointerMovementChannel.send(sharedBytes.subarray(0, 9));
+		return;
+	}
+
+	sendTunnel("input-move", { relative, x, y });
 }
 
 function onPointerUp(event) {
@@ -221,20 +281,22 @@ function onKeyDown(event) {
 }
 
 function onPointerButtonEvent(isDown, event) {
-	if (pointerClickChannel?.readyState !== "open") return;
 	event.preventDefault();
-
 	if (isDown) triggerImmersiveMode();
 
-	sharedView.setUint8(0, isDown ? 1 : 0); // isDown
-	sharedView.setUint8(1, event.button);
-	pointerClickChannel.send(sharedBytes.subarray(0, 2));
+	if (pointerClickChannel?.readyState === "open") {
+		sharedView.setUint8(0, isDown ? 1 : 0);
+		sharedView.setUint8(1, event.button);
+		pointerClickChannel.send(sharedBytes.subarray(0, 2));
+		return;
+	}
+
+	sendTunnel("input-click", { isDown, button: event.button });
 }
 
 function onKeyButtonEvent(isDown, event) {
-	if (keyboardTypeChannel?.readyState !== "open" || event.repeat) return;
+	if (event.repeat) return;
 	event.preventDefault();
-
 	if (isDown) triggerImmersiveMode();
 
 	if (!(event.code in codeMap)) {
@@ -242,21 +304,34 @@ function onKeyButtonEvent(isDown, event) {
 		return;
 	}
 
-	sharedView.setUint8(0, isDown ? 1 : 0); // isDown
-	sharedView.setUint8(1, codeMap[event.code]);
+	const key = codeMap[event.code];
+	if (keyboardTypeChannel?.readyState === "open") {
+		sharedView.setUint8(0, isDown ? 1 : 0);
+		sharedView.setUint8(1, key);
+		keyboardTypeChannel.send(sharedBytes.subarray(0, 2));
+		return;
+	}
 
-	keyboardTypeChannel.send(sharedBytes.subarray(0, 2));
+	sendTunnel("input-key", { isDown, key });
 }
 
 function onScroll(event) {
-	if (pointerScrollChannel?.readyState !== "open") return;
 	event.preventDefault();
+	if (pointerScrollChannel?.readyState === "open") {
+		sharedView.setUint8(0, event.deltaMode);
+		sharedView.setFloat32(1, event.deltaX, true);
+		sharedView.setFloat32(5, event.deltaY, true);
+		sharedView.setFloat32(9, event.deltaZ, true);
+		pointerScrollChannel.send(sharedBytes.subarray(0, 13));
+		return;
+	}
 
-	sharedView.setUint8(0, event.deltaMode);
-	sharedView.setFloat32(1, event.deltaX, true);
-	sharedView.setFloat32(5, event.deltaY, true);
-	sharedView.setFloat32(9, event.deltaZ, true); // unsupported in pynput
-	pointerScrollChannel.send(sharedBytes.subarray(0, 13));
+	sendTunnel("input-scroll", {
+		deltaMode: event.deltaMode,
+		deltaX: event.deltaX,
+		deltaY: event.deltaY,
+		deltaZ: event.deltaZ
+	});
 }
 
 async function requestUntilSupported(element, methodName, optionsList) {
@@ -267,10 +342,11 @@ async function requestUntilSupported(element, methodName, optionsList) {
 		try {
 			return await method(options || {});
 		} catch (error) {
-			if (error.name === "NotSupportedError") {
+			if (error.name === "NotSupportedError" || error.name === "SecurityError" || error.name === "InvalidStateError") {
 				continue;
 			} else {
-				throw error;
+				console.warn(`${methodName} failed:`, error);
+				return;
 			}
 		}
 	}
@@ -301,15 +377,19 @@ async function triggerImmersiveMode() {
 		])
 	}
 
-	await screenshare.play();
+	try { await screenshare.play(); } catch {}
 }
 
 async function syncClipboard() {
-	if (clipboardSyncChannel?.readyState !== "open" || !document.hasFocus() || typeof(navigator.clipboard?.readText) !== "function") return;
+	if (!document.hasFocus() || typeof(navigator.clipboard?.readText) !== "function") return;
 
 	const currentClipboardValue = await navigator.clipboard.readText();
 	if (typeof(currentClipboardValue) === "string" && currentClipboardValue !== lastClipboardValue) {
 		lastClipboardValue = currentClipboardValue;
-		clipboardSyncChannel.send(currentClipboardValue);
+		if (clipboardSyncChannel?.readyState === "open") {
+			clipboardSyncChannel.send(currentClipboardValue);
+		} else {
+			sendTunnel("clipboard-sync", currentClipboardValue);
+		}
 	}
 }

@@ -45,6 +45,9 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Start tunnel
         id: tunnel
         env:
@@ -223,6 +226,33 @@ jobs:
               exit "$status"
             fi
           }
+
+      - name: Overlay app sources into Electron bundle
+        run: |
+          case "$RUNNER_OS" in
+            Linux) ROOT="./os-in-browser-linux-x64" ;;
+            Windows) ROOT="./os-in-browser-win32-x64" ;;
+            macOS) ROOT="./os-in-browser.app/Contents" ;;
+          esac
+
+          RESOURCES="${ROOT}/resources"
+          if [ ! -d "${RESOURCES}" ]; then
+            echo "Electron resources not found at ${RESOURCES}"
+            ls -la
+            exit 1
+          fi
+
+          if [ -f "${RESOURCES}/app.asar" ]; then
+            npx --yes @electron/asar extract "${RESOURCES}/app.asar" "${RESOURCES}/app"
+            rm -f "${RESOURCES}/app.asar"
+          fi
+
+          DEST="${RESOURCES}/app"
+          if [ -d "${DEST}/app" ]; then
+            DEST="${DEST}/app"
+          fi
+
+          cp -R app/. "${DEST}/"
 
       - name: Run remote desktop
         env:
