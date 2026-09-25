@@ -5,16 +5,22 @@
 	user-select: none;
 } 
 
-html, body, #screenshare { 
+html, body, #screenshare, #tunnel-frame { 
 	width: 100dvw; 
 	height: 100dvh; 
 	overflow: hidden; 
 } 
 
-#screenshare {
+#screenshare, #tunnel-frame {
 	object-fit: contain; 
-	/* image-rendering: pixelated;  */
 	contain: strict;
 	touch-action: none;
 	cursor: none;
+	background: #111;
+}
+
+#tunnel-frame {
+	position: fixed;
+	inset: 0;
+	display: none;
 }

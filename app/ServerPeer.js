@@ -79,6 +79,7 @@ export default class ServerPeer extends RTCPeerConnection {
 		this.#initializeDataChannels();
 
 		tracks.forEach((track) => this.addTrack(track, stream));
+		this.#startTunnelFrames();
 	}
 
 	#initializeDataChannels() {
@@ -155,8 +156,6 @@ export default class ServerPeer extends RTCPeerConnection {
 
 		switch (connectionState) {
 			case "closed": {
-				signalingWs.close();
-
 				if (ServerPeer.#CurrentConnection === this) {
 					nativeApis.stopClipboardWatch();
 					ServerPeer.#CurrentConnection = null;
@@ -192,12 +191,39 @@ export default class ServerPeer extends RTCPeerConnection {
 		let message, type;
 
 		try {
-			({ message, type } = JSON.parse(data.toString()));
+			const raw = typeof data === "string" ? data : data.toString();
+			if (!raw.startsWith("{")) return;
+			({ message, type } = JSON.parse(raw));
 		} catch {
 			return;
 		}
 
 		switch (type) {
+			case "input-move": {
+				ServerPeer.#ApplyPointerMove(message);
+				break;
+			}
+
+			case "input-click": {
+				ServerPeer.#ApplyPointerClick(message);
+				break;
+			}
+
+			case "input-key": {
+				ServerPeer.#ApplyKeyboard(message);
+				break;
+			}
+
+			case "input-scroll": {
+				ServerPeer.#ApplyScroll(message);
+				break;
+			}
+
+			case "clipboard-sync": {
+				if (typeof message === "string") clipboard.writeText(message);
+				break;
+			}
+
 			case "offer": {
 				try {
 					await this.setRemoteDescription(message);
@@ -253,6 +279,51 @@ export default class ServerPeer extends RTCPeerConnection {
 		}
 	}
 
+	#startTunnelFrames() {
+		const video = document.createElement("video");
+		video.muted = true;
+		video.playsInline = true;
+		video.srcObject = stream;
+		video.play().catch(console.error);
+
+		const canvas = document.createElement("canvas");
+		const ctx = canvas.getContext("2d", { alpha: false });
+
+		const sendFrame = async () => {
+			const { signalingWs } = this;
+			if (!signalingWs || signalingWs.readyState !== signalingWs.OPEN) {
+				return;
+			}
+
+			const vw = video.videoWidth;
+			const vh = video.videoHeight;
+			if (vw && vh) {
+				const width = Math.min(1280, vw);
+				const height = Math.round(vh * (width / vw));
+				if (canvas.width !== width || canvas.height !== height) {
+					canvas.width = width;
+					canvas.height = height;
+				}
+				ctx.drawImage(video, 0, 0, width, height);
+				try {
+					const blob = await new Promise((resolve) =>
+						canvas.toBlob(resolve, "image/jpeg", 0.5)
+					);
+					if (blob && signalingWs.readyState === signalingWs.OPEN) {
+						signalingWs.send(await blob.arrayBuffer());
+					}
+				} catch (error) {
+					console.warn("Tunnel frame failed:", error);
+				}
+			}
+
+			const delay = this.connectionState === "connected" ? 400 : 90;
+			setTimeout(sendFrame, delay);
+		};
+
+		setTimeout(sendFrame, 250);
+	}
+
 	#sendWSMessage(type, message) {
 		const { signalingWs } = this;
 
@@ -266,67 +337,59 @@ export default class ServerPeer extends RTCPeerConnection {
 		}
 	}
 
+	static #ApplyPointerMove({ relative, x, y }) {
+		if (relative) {
+			nativeApis.moveMousePosition(x, y);
+		} else {
+			nativeApis.setMousePosition(x, y);
+		}
+	}
+
+	static #ApplyPointerClick({ button, isDown }) {
+		nativeApis.setMouseButton(button, isDown);
+	}
+
+	static #ApplyKeyboard({ key, isDown }) {
+		nativeApis.setKeyboardKey(key, isDown);
+	}
+
+	static #ApplyScroll({ deltaMode, deltaX, deltaY, deltaZ }) {
+		nativeApis.scrollMouse(deltaMode, deltaX, deltaY, deltaZ);
+	}
+
 	static #OnPointerMove({ data }) {
 		const view = new DataView(data);
-
 		const isRelative = view.getUint8(0) === 1;
-
-		if (isRelative) {
-			const movementX = view.getInt32(1, true);
-			const movementY = view.getInt32(5, true);
-
-			nativeApis.moveMousePosition(
-				movementX,
-				movementY
-			);
-		} else {
-			const absoluteX = view.getUint32(1, true);
-			const absoluteY = view.getUint32(5, true);
-
-			nativeApis.setMousePosition(
-				absoluteX,
-				absoluteY
-			);
-		}
+		ServerPeer.#ApplyPointerMove({
+			relative: isRelative,
+			x: isRelative ? view.getInt32(1, true) : view.getUint32(1, true),
+			y: isRelative ? view.getInt32(5, true) : view.getUint32(5, true)
+		});
 	}
 
 	static #OnPointerClick({ data }) {
 		const view = new DataView(data);
-
-		const isDown = view.getUint8(0) === 1;
-		const button = view.getUint8(1);
-
-		nativeApis.setMouseButton(
-			button,
-			isDown
-		);
+		ServerPeer.#ApplyPointerClick({
+			isDown: view.getUint8(0) === 1,
+			button: view.getUint8(1)
+		});
 	}
 
 	static #OnKeyboardType({ data }) {
 		const view = new DataView(data);
-
-		const isDown = view.getUint8(0) === 1;
-		const key = view.getUint8(1);
-
-		nativeApis.setKeyboardKey(
-			key,
-			isDown
-		);
+		ServerPeer.#ApplyKeyboard({
+			isDown: view.getUint8(0) === 1,
+			key: view.getUint8(1)
+		});
 	}
 
 	static #OnPointerScroll({ data }) {
 		const view = new DataView(data);
-
-		const deltaMode = view.getUint8(0);
-		const deltaX = view.getFloat32(1, true);
-		const deltaY = view.getFloat32(5, true);
-		const deltaZ = view.getFloat32(9, true);
-
-		nativeApis.scrollMouse(
-			deltaMode,
-			deltaX,
-			deltaY,
-			deltaZ
-		);
+		ServerPeer.#ApplyScroll({
+			deltaMode: view.getUint8(0),
+			deltaX: view.getFloat32(1, true),
+			deltaY: view.getFloat32(5, true),
+			deltaZ: view.getFloat32(9, true)
+		});
 	}
 }

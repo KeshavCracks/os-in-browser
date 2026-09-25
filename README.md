@@ -1,6 +1,6 @@
 # MAKE SURE TO READ EVERYTHING
 
-# How to use
+# How to use (Chrome — just open the link like a website)
 1. [Fork](https://www.github.com/kingdudely/os-in-browser/fork) the main repository. (it is recommended to make it public for unlimited usage)
 3. ONLY when you are in your new repository, [go here](/../../actions/workflows/main.yml).
 4. Click on <img width="117" height="28" alt="a white button that says 'Run workflow'" src="https://github.com/user-attachments/assets/77d4ff12-b5be-4e1f-9b39-008975e20898" />
@@ -15,15 +15,15 @@
 # Troubleshooting: "Connection to the remote desktop failed"
 This is a **WebRTC** session. Signaling goes through the Cloudflare tunnel, but the video/control stream tries to punch UDP through STUN/TURN.
 
-If you see a white page after clicking OK on screenshare, or `Connection to the remote desktop failed, retrying connection...`:
+This fork streams the desktop over the **same HTTPS/WebSocket link** as the page (like a normal website). You should not need to disable WARP/VPN just to see the screen.
 
-1. **Turn off Cloudflare WARP** (and any other VPN). This is the most common cause — WARP intercepts/blocks STUN UDP. The same session often works on a phone that is not on WARP.
-2. Reload the page after disconnecting WARP.
-3. Disable Brave/uBlock shields that block WebRTC for this site.
-4. Try another network (mobile hotspot).
-5. Pointer-lock errors like `the root document of this element is not valid for pointer lock` are harmless if video still plays; click the page once after connecting.
+If it is still white:
 
-It working on Android but not on a Linux laptop almost always means a local VPN/firewall on the laptop, not a dead GitHub Actions job.
+1. Wait until the Actions job is **running** and the URL is printed, then open it.
+2. Log in, then **click once** on the page.
+3. If the job already stopped, run the workflow again (the Mac is gone).
+
+Old upstream issue: Cloudflare WARP broke **WebRTC-only** streaming. Tunnel fallback covers that.
 <!-- add a GIF tutorial -->
 
 # Video tutorial
